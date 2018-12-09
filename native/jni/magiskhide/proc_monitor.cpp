@@ -131,7 +131,7 @@ void proc_monitor() {
 	char buf[4096];
 	while (fgets(buf, sizeof(buf), log_in)) {
 		char *log;
-		int pid, ppid;
+		int pid, ppid, uid;
 		struct stat ns, pns;
 
 		if ((log = strchr(buf, '[')) == nullptr)
@@ -140,45 +140,87 @@ void proc_monitor() {
 		// Extract pid
 		if (sscanf(log, "[%*d,%d", &pid) != 1)
 			continue;
-
-		// Extract last token (component name)
-		const char *tok, *cpnt = "";
-		while ((tok = strtok_r(nullptr, ",[]\n", &log)))
-			cpnt = tok;
-		if (cpnt[0] == '\0')
+			
+		// Extract uid
+		if (sscanf(log, "[%d", &uid) != 1)
 			continue;
+			
+		LOGI("proc_monitor EXTUID: UID=[%d]\n", uid);
 
-		// Make sure our target is alive
-		if ((ppid = parse_ppid(pid)) < 0 || read_ns(ppid, &pns))
-			continue;
+		if (uid == 10) {
+			LOGI("proc_monitor UID10 ALLPROCESSES: %s", log);
 
-		bool hide = false;
-		pthread_mutex_lock(&list_lock);
-		for (auto &s : hide_list) {
-			if (strncmp(cpnt, s, s.size() - 1) == 0) {
-				hide = true;
-				break;
+			// Extract last token (component name)
+			const char *tok, *cpnt = "";
+			while ((tok = strtok_r(nullptr, ",[]\n", &log)))
+				cpnt = tok;
+			if (cpnt[0] == '\0')
+				continue;
+			
+			// Make sure our target is alive
+			if ((ppid = parse_ppid(pid)) < 0 || read_ns(ppid, &pns))
+				continue;
+			LOGI("proc_monitor UID10 ISALIVE: PID=[%d]", pid);
+				
+			while (read_ns(pid, &ns) == 0 && ns.st_dev == pns.st_dev && ns.st_ino == pns.st_ino)
+				usleep(50);
+			LOGI("proc_monitor UID10 AFTERREADNS: PID=[%d]", pid);
+				
+			// Send pause signal ASAP
+			if (kill(pid, SIGSTOP) == -1)
+				continue;
+			LOGI("proc_monitor UID10 SENTKILL: PID=[%d]", pid);
+			/*
+			 * The setns system call do not support multithread processes
+			 * We have to fork a new process, setns, then do the unmounts
+			 */
+			LOGI("proc_monitor: %s PID=[%d] ns=[%llu]\n", cpnt, pid, ns.st_ino);
+			if (fork_dont_care() == 0) {
+				hide_daemon(pid);
+			} else {
+				LOGI("proc_monitor UID10 FORKCARE: PID=[%d]", pid);
 			}
+		} else { 
+
+			// Extract last token (component name)
+			const char *tok, *cpnt = "";
+			while ((tok = strtok_r(nullptr, ",[]\n", &log)))
+				cpnt = tok;
+			if (cpnt[0] == '\0')
+				continue;
+
+			// Make sure our target is alive
+			if ((ppid = parse_ppid(pid)) < 0 || read_ns(ppid, &pns))
+				continue;
+
+			bool hide = false;
+			pthread_mutex_lock(&list_lock);
+			for (auto &s : hide_list) {
+				if (strncmp(cpnt, s, s.size() - 1) == 0) {
+					hide = true;
+					break;
+				}
+			}
+			pthread_mutex_unlock(&list_lock);
+
+			if (!hide)
+				continue;
+
+			while (read_ns(pid, &ns) == 0 && ns.st_dev == pns.st_dev && ns.st_ino == pns.st_ino)
+				usleep(50);
+
+			// Send pause signal ASAP
+			if (kill(pid, SIGSTOP) == -1)
+				continue;
+
+			/*
+			 * The setns system call do not support multithread processes
+			 * We have to fork a new process, setns, then do the unmounts
+			 */
+			LOGI("proc_monitor: %s PID=[%d] ns=[%llu]\n", cpnt, pid, ns.st_ino);
+			if (fork_dont_care() == 0)
+				hide_daemon(pid);
 		}
-		pthread_mutex_unlock(&list_lock);
-
-		if (!hide)
-			continue;
-
-		while (read_ns(pid, &ns) == 0 && ns.st_dev == pns.st_dev && ns.st_ino == pns.st_ino)
-			usleep(500);
-
-		// Send pause signal ASAP
-		if (kill(pid, SIGSTOP) == -1)
-			continue;
-
-		/*
-		 * The setns system call do not support multithread processes
-		 * We have to fork a new process, setns, then do the unmounts
-		 */
-		LOGI("proc_monitor: %s PID=[%d] ns=[%llu]\n", cpnt, pid, ns.st_ino);
-		if (fork_dont_care() == 0)
-			hide_daemon(pid);
 	}
 	pthread_exit(nullptr);
 }
